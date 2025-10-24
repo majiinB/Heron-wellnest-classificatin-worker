@@ -12,6 +12,7 @@ from app.services.classification_service import ClassificationService
 from app.utils.logger_util import logger
 from app.repositories.student_analytics_repository import CreateStudentAnalytics, StudentAnalyticsRepository
 from app.repositories.student_classification_repository import StudentClassificationRepository
+from app.repositories.flip_and_feel_repository import get_flipfeel_by_user_id
 
 # Journal L1..L5 -> probability feature names
 LABEL_TO_PKEY = {
@@ -35,7 +36,6 @@ def _normalize_mood(val: Any) -> Optional[str]:
     if val is None:
         return None
     if isinstance(val, int):
-        # map ids externally if needed
         return None
     if isinstance(val, str):
         name = val.strip()
@@ -61,7 +61,6 @@ def _aggregate_wellness_probs(journals: List[Dict[str, Any]]) -> Dict[str, float
     for item in journals:
         ws = item.get("wellness_state") or {}
 
-        # 🧽 If it's stored as a JSON string in Postgres, decode it.
         if isinstance(ws, str):
             try:
                 ws = json.loads(ws)
@@ -76,7 +75,6 @@ def _aggregate_wellness_probs(journals: List[Dict[str, Any]]) -> Dict[str, float
                     totals[k] += float(v)
                     any_num = True
                 except (ValueError, TypeError):
-                    # ignore non-numeric entries
                     pass
 
         if any_num:
@@ -95,26 +93,57 @@ def _default_flipfeel_pct() -> Dict[str, float]:
     }
 
 def _to_native(obj):
-    """Recursively convert numpy / non-serializable types to native Python types."""
     if obj is None:
         return None
-    # numpy scalar types
     if isinstance(obj, (np.integer,)):
         return int(obj)
     if isinstance(obj, (np.floating,)):
         return float(obj)
     if isinstance(obj, (np.bool_ ,)):
         return bool(obj)
-    # numpy arrays -> lists
     if isinstance(obj, np.ndarray):
         return obj.tolist()
-    # dict / list / tuple / set -> recurse
     if isinstance(obj, dict):
         return {str(k): _to_native(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple, set)):
         return [_to_native(v) for v in obj]
-    # fallback
     return obj
+
+def _normalize_flipfeel_label(label: Optional[str]) -> Optional[str]:
+    if not label:
+        return None
+    s = label.strip().lower()
+    # normalize common variants
+    if "crisi" in s or "crisis" in s:
+        return "InCrisis"
+    if "excelling" in s:
+        return "Excelling"
+    if "thriv" in s:
+        return "Thriving"
+    if "struggl" in s:
+        return "Struggling"
+    return None
+
+def _compute_flipfeel_pct_from_sessions(sessions: List[Dict[str, Any]]) -> Dict[str, float]:
+    if not sessions:
+        return _default_flipfeel_pct()
+    counts = {"Excelling": 0, "Thriving": 0, "Struggling": 0, "InCrisis": 0}
+    total = 0
+    for sess in sessions:
+        labels = sess.get("mood_labels") or []
+        for l in labels:
+            norm = _normalize_flipfeel_label(l)
+            if norm:
+                counts[norm] += 1
+                total += 1
+    if total == 0:
+        return _default_flipfeel_pct()
+    return {
+        "flipfeel_incrisis_pct": counts["InCrisis"] / total,
+        "flipfeel_struggling_pct": counts["Struggling"] / total,
+        "flipfeel_thriving_pct": counts["Thriving"] / total,
+        "flipfeel_excelling_pct": counts["Excelling"] / total,
+    }
 
 class ClassificationController:
     def __init__(
@@ -129,13 +158,6 @@ class ClassificationController:
         self.classification_repo = classification_repo
 
     async def classify_today_entries(self, top_k: int = 1):
-        """
-        Build per-user model inputs for today's date (UTC):
-        - p_* from averaged journal wellness (L1..L5)
-        - one-hot 16 emotions from check-in (mood_1..mood_3)
-        - gratitude_flag from gratitude entries presence
-        - flipfeel_*_pct default to 0.0
-        """
         for_date = datetime.now(timezone.utc).date()
 
         mood_rows = await get_users_mood_check_ins_for_date(for_date)
@@ -151,18 +173,20 @@ class ClassificationController:
             has_grat = await has_gratitude_entry_for_date(uid, for_date)
             moods = mood_by_user[uid]
 
-            # 1) Journal probs (averages)
             probs = _aggregate_wellness_probs(journals)
 
-            # 2) One-hot emotions from check-in (min 1, max 3)
             one_hot = _one_hot_moods([
                 moods.get("mood_1"),
                 moods.get("mood_2"),
                 moods.get("mood_3"),
             ])
 
-            # 3) Flipfeel default pct
-            flipfeel = _default_flipfeel_pct()
+            # Use flip_and_feel repository to compute flipfeel proportions for this user/date.
+            try:
+                sessions = await get_flipfeel_by_user_id(uid, for_date)
+            except Exception:
+                sessions = []
+            flipfeel = _compute_flipfeel_pct_from_sessions(sessions)
 
             model_input = {
                 **probs,
@@ -180,7 +204,6 @@ class ClassificationController:
         per_user_inputs = await asyncio.gather(*(build_model_input(uid) for uid in user_ids))
         logger.info(f"Built {len(per_user_inputs)} model inputs for date={for_date} (top_k={top_k})")
 
-        # Run the model on the batch while holding the model lock and offloading to a worker thread.
         input_batch = [item["model_input"] for item in per_user_inputs]
         loop = asyncio.get_running_loop()
         async with self.model_lock:
@@ -188,7 +211,6 @@ class ClassificationController:
                 None, lambda: self.classifcation_service.classify_user(input_batch, top_k=top_k)
             )
 
-        # Merge classification outputs back to users by order.
         final = []
         for item, clf in zip(per_user_inputs, clf_results):
             prediction = _to_native(clf.get("prediction"))
@@ -200,11 +222,9 @@ class ClassificationController:
             }
             final.append(final_item)
 
-            # Persist analytics and classification
             uid = item["user_id"]
             model_input = item["model_input"]
 
-            # Build CreateStudentAnalytics payload
             analytics_kwargs = {
                 "date_recorded": datetime.now(timezone.utc),
                 "gratitude_flag": bool(model_input.get("gratitude_flag", 0)),
@@ -218,12 +238,10 @@ class ClassificationController:
                     "p_depressed") is not None else None,
             }
 
-            # moods -> mood_* fields
             for name in EMOTIONS:
                 field_name = f"mood_{name.lower()}"
                 analytics_kwargs[field_name] = int(model_input.get(name, 0))
 
-            # flipfeel -> f_and_f_* mapping
             analytics_kwargs["f_and_f_in_crisis"] = float(model_input.get("flipfeel_incrisis_pct", 0.0))
             analytics_kwargs["f_and_f_struggling"] = float(model_input.get("flipfeel_struggling_pct", 0.0))
             analytics_kwargs["f_and_f_thriving"] = float(model_input.get("flipfeel_thriving_pct", 0.0))
@@ -240,13 +258,11 @@ class ClassificationController:
             payload = CreateStudentAnalytics(**analytics_kwargs)
 
             try:
-                # persist analytics and classification (await both)
                 await self.analytics_repo.create(payload)
-                # convert uid string to UUIDType if needed
                 try:
                     student_uuid = UUIDType(uid)
                 except Exception:
-                    student_uuid = uid  # let repository handle conversion/fail
-                await self.classification_repo.create(student_uuid, prediction, is_flagged=is_flagged)
+                    student_uuid = uid
+                await self.classification_repo.create(student_uuid, prediction)
             except Exception as exc:
                 logger.exception("Failed to persist analytics/classification for user=%s: %s", uid, exc)

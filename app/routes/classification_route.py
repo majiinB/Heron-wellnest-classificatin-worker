@@ -35,8 +35,21 @@ clf_controller = ClassificationController(
     student_classification_repo,
 )
 
-@router.post("/scheduler")
+@router.post("/daily-scheduler")
 async def run_daily_classification():
+    """
+    Triggers today's (UTC) batch classification via the controller.
+    Returns per-user results including prediction and probabilities.
+    """
+    try:
+        await clf_controller.classify_today_entries()
+        return {"status": "ok"}, 200
+    except Exception as e:
+        logger.error(f"Error running daily classification: {e}")
+        return {"error": str(e)}, 500
+
+@router.post("/weekly-scheduler")
+async def run_weekly_classification():
     """
     Triggers today's (UTC) batch classification via the controller.
     Returns per-user results including prediction and probabilities.

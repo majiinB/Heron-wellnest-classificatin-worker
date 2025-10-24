@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import List, Iterable, Any, Optional
 from uuid import UUID, uuid4
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy.orm import sessionmaker
 from app.model.student_analytics_model import StudentAnalytics
 from app.model.student_classification_model import ClassificationLabel

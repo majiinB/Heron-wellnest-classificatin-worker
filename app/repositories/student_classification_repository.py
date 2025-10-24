@@ -12,7 +12,6 @@ from app.model.student_analytics_model import StudentAnalytics
 class CreateStudentClassification:
     student_id: UUID
     classification: Optional[str]
-    is_flagged: bool = False
     classified_at: Optional[datetime] = None
     classification_id: Optional[UUID] = None
 
@@ -35,7 +34,6 @@ class StudentClassificationRepository:
         self,
         student_id: UUID,
         classification: Any,
-        is_flagged: bool = False,
         classified_at: Optional[datetime] = None,
         classification_id: Optional[UUID] = None,
     ) -> StudentClassification:
@@ -44,7 +42,6 @@ class StudentClassificationRepository:
                 classification_id=classification_id or uuid4(),
                 student_id=student_id,
                 classification=self._to_enum(classification),
-                is_flagged=bool(is_flagged),
                 classified_at=classified_at,
             )
             session.add(inst)
@@ -60,7 +57,6 @@ class StudentClassificationRepository:
                     classification_id=item.classification_id or uuid4(),
                     student_id=item.student_id,
                     classification=self._to_enum(item.classification),
-                    is_flagged=bool(item.is_flagged),
                     classified_at=item.classified_at,
                 )
                 created.append(inst)

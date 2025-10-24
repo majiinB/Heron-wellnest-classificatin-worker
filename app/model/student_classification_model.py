@@ -1,6 +1,5 @@
-# python
 from enum import Enum
-from sqlalchemy import Column, Boolean, DateTime, func
+from sqlalchemy import Column, DateTime, func
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID, ENUM as PG_ENUM
 from sqlalchemy.orm import declarative_base
 import uuid
@@ -40,8 +39,6 @@ class StudentClassification(Base):
         nullable=False,
     )
 
-    is_flagged = Column(Boolean, nullable=False, default=False)
-
     classified_at = Column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -54,6 +51,5 @@ class StudentClassification(Base):
             "classification_id": str(self.classification_id) if self.classification_id else None,
             "student_id": str(self.student_id) if self.student_id else None,
             "classification": (self.classification.value if isinstance(self.classification, ClassificationLabel) else str(self.classification)) if self.classification is not None else None,
-            "is_flagged": bool(self.is_flagged),
             "classified_at": self.classified_at.isoformat() if isinstance(self.classified_at, datetime) else None,
         }
