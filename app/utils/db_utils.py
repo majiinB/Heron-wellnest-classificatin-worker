@@ -1,39 +1,63 @@
-# app/repository/db_utils.py
+# app/utils/db_utils.py
 """
 Utility functions for performing direct SQL queries using SQLAlchemy.
 """
 
+from typing import Optional, Dict, Any, List
 from sqlalchemy import text
+from sqlalchemy.engine import Result
 from app.config.datasource_config import SessionLocal
 
-async def fetch_one(query: str, params: dict | None = None):
+
+def _is_write_query(query: str) -> bool:
+    """Check if query is a write operation that needs a commit."""
+    if not query:
+        return False
+    q = query.strip().split()[0].upper()
+    return q in ("INSERT", "UPDATE", "DELETE") or "RETURNING" in query.upper()
+
+
+async def fetch_one(query: str, params: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """
-    Executes a single SQL query and fetches the first result.
-
-    This function uses SQLAlchemy to execute the provided SQL query asynchronously.
-    It returns the first result of the query as a mapping (dictionary-like object).
-
-    Args:
-        query (str): The SQL query to execute.
-        params (dict | None, optional): A dictionary of parameters to bind to the query. Defaults to None.
-
-    Returns:
-        Mapping or None: The first result of the query as a mapping, or None if no results are found.
-
-    Example:
-        result = await fetch_one("SELECT * FROM users WHERE id = :id", {"id": 1})
-        print(result)  # Output: {'id': 1, 'name': 'John Doe'}
+    Execute a query and return a single row as a dict (or None).
+    Commits for write queries (INSERT/UPDATE/DELETE or queries with RETURNING).
     """
     async with SessionLocal() as session:
-        result = await session.execute(text(query), params or {})
-        return result.mappings().first()
+        result: Result = await session.execute(text(query), params or {})
+        row = result.mappings().first()
+        if _is_write_query(query):
+            await session.commit()
+        return dict(row) if row is not None else None
 
-async def fetch_all(query: str, params: dict | None = None):
+
+async def fetch_all(query: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """
+    Execute a query and return all rows as a list of dicts.
+    Commits for write queries.
+    """
     async with SessionLocal() as session:
-        result = await session.execute(text(query), params or {})
-        return result.mappings().all()
+        result: Result = await session.execute(text(query), params or {})
+        rows = result.mappings().all()
+        if _is_write_query(query):
+            await session.commit()
+        return [dict(r) for r in rows] if rows else []
 
-async def execute_query(query: str, params: dict | None = None):
+
+async def execute_query(query: str, params: Optional[Dict[str, Any]] = None):
     async with SessionLocal() as session:
         await session.execute(text(query), params or {})
         await session.commit()
+
+
+async def execute(query: str, params: Optional[Dict[str, Any]] = None) -> int:
+    """
+    Execute a write/update/delete statement, commit, and return affected row count.
+    """
+    async with SessionLocal() as session:
+        result: Result = await session.execute(text(query), params or {})
+        await session.commit()
+        try:
+            rc = result.rowcount
+            return int(rc) if rc is not None else 0
+        except Exception:
+            return 0

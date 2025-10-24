@@ -55,7 +55,7 @@ async def run_weekly_classification():
     Returns per-user results including prediction and probabilities.
     """
     try:
-        await clf_controller.classify_today_entries()
+        await clf_controller.classify_weekly_entries()
         return {"status": "ok"}, 200
     except Exception as e:
         logger.error(f"Error running daily classification: {e}")

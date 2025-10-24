@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta, date
 import asyncio
 import numpy as np
 import re
@@ -13,6 +13,8 @@ from app.utils.logger_util import logger
 from app.repositories.student_analytics_repository import CreateStudentAnalytics, StudentAnalyticsRepository
 from app.repositories.student_classification_repository import StudentClassificationRepository
 from app.repositories.flip_and_feel_repository import get_flipfeel_by_user_id
+from app.services.weekly_classification_service import WeeklyClassificationService
+from app.repositories.student_weekly_classification_repository import StudentWeeklyClassificationRepository
 
 # Journal L1..L5 -> probability feature names
 LABEL_TO_PKEY = {
@@ -181,7 +183,6 @@ class ClassificationController:
                 moods.get("mood_3"),
             ])
 
-            # Use flip_and_feel repository to compute flipfeel proportions for this user/date.
             try:
                 sessions = await get_flipfeel_by_user_id(uid, for_date)
             except Exception:
@@ -250,10 +251,7 @@ class ClassificationController:
 
             analytics_kwargs["classification"] = prediction
 
-            if (prediction == "InCrisis") or (prediction == 'Struggling'):
-                is_flagged = True
-            else:
-                is_flagged = False
+            is_flagged = True if (prediction == "InCrisis" or prediction == "Struggling") else False
 
             payload = CreateStudentAnalytics(**analytics_kwargs)
 
@@ -266,3 +264,67 @@ class ClassificationController:
                 await self.classification_repo.create(student_uuid, prediction)
             except Exception as exc:
                 logger.exception("Failed to persist analytics/classification for user=%s: %s", uid, exc)
+
+        return final
+
+    async def classify_weekly_entries(self, days: int = 7):
+        """
+        Find all students who have daily classifications within the computed week range
+        and run WeeklyClassificationService.classify_and_record_week for each.
+        """
+        end_date = datetime.now(timezone.utc).date()
+        start_date = end_date - timedelta(days=days - 1)
+
+        week_start = datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc)
+        week_end = datetime(end_date.year, end_date.month, end_date.day, tzinfo=timezone.utc) + timedelta(days=1)
+
+        try:
+            classifications_in_range = await self.classification_repo.list_between(week_start, week_end)
+        except AttributeError:
+            try:
+                all_items = await self.classification_repo.list_all(limit=10000)
+            except AttributeError:
+                raise RuntimeError("classification repository lacks `list_between` and `list_all` methods; adapt to repo API")
+            classifications_in_range = [
+                it for it in all_items
+                if getattr(it, "classified_at", None) is not None
+                   and (it.classified_at >= week_start and it.classified_at < week_end)
+            ]
+
+        if not classifications_in_range:
+            logger.info("No student classifications found for week range=%s..%s", start_date, end_date)
+            return []
+
+        def _student_id_from_item(it):
+            sid = getattr(it, "student_id", None)
+            if sid is None:
+                sid = getattr(it, "student", None)
+            if sid is None:
+                sid = getattr(it, "user_id", None)
+            return str(sid) if sid is not None else None
+
+        student_ids = { _student_id_from_item(it) for it in classifications_in_range }
+        student_ids.discard(None)
+        user_ids = list(student_ids)
+
+        weekly_service = WeeklyClassificationService(self.classification_repo, StudentWeeklyClassificationRepository())
+
+        tasks = []
+        for uid in user_ids:
+            try:
+                student_uuid = UUIDType(uid)
+            except Exception:
+                student_uuid = uid
+            tasks.append(weekly_service.classify_and_record_week(student_uuid, week_start, week_end))
+
+        raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        results = []
+        for uid, res in zip(user_ids, raw_results):
+            if isinstance(res, Exception):
+                logger.exception("Failed weekly classification for user=%s: %s", uid, res)
+            else:
+                results.append(res)
+
+        logger.info("Completed weekly classification for %d users range=%s..%s", len(user_ids), start_date, end_date)
+        return results

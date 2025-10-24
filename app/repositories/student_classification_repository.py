@@ -91,3 +91,35 @@ class StudentClassificationRepository:
             )
             result = await session.execute(stmt)
             return result.scalars().all()
+
+    async def list_all(self, limit: int = 1000, offset: int = 0) -> List[StudentClassification]:
+        """
+        Return up to `limit` StudentClassification rows ordered by classified_at descending.
+        Use `offset` for pagination.
+        """
+        async with self.session_factory() as session:  # type: AsyncSession
+            stmt = (
+                select(StudentClassification)
+                .order_by(desc(StudentClassification.classified_at))
+                .limit(limit)
+                .offset(offset)
+            )
+            result = await session.execute(stmt)
+            return result.scalars().all()
+
+    async def list_between(self, start: datetime, end: datetime) -> List[StudentClassification]:
+        """
+        Return StudentClassification rows with classified_at in [start, end),
+        ordered by classified_at descending.
+        """
+        async with self.session_factory() as session:  # type: AsyncSession
+            stmt = (
+                select(StudentClassification)
+                .where(
+                    StudentClassification.classified_at >= start,
+                    StudentClassification.classified_at < end,
+                )
+                .order_by(desc(StudentClassification.classified_at))
+            )
+            result = await session.execute(stmt)
+            return result.scalars().all()

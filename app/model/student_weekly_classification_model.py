@@ -5,7 +5,6 @@ from datetime import datetime
 import uuid
 from enum import Enum
 from app.model.student_classification_model import Base
-from .student_weekly_classification_model import WeeklyClassificationLabel  # referencing the enum above
 
 class WeeklyClassificationLabel(Enum):
     Excelling = "Excelling"
